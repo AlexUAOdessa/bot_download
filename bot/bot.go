@@ -193,7 +193,7 @@ func (b *Bot) handleRegistrationStep(tgUser *tgbotapi.User, text string, state R
 		if state.Login != "Ukraine" || text != "Odesa" {
 			// Очищаем состояние
 			delete(b.registrationState, tgUser.ID)
-			return "Неверный логин или пароль. Логин должен быть 'Ukraine', а пароль — 'Odesa'. Попробуйте снова с /reg."
+			return "Ваш статус гость"
 		}
 
 		// Создаём или обновляем пользователя
@@ -206,7 +206,7 @@ func (b *Bot) handleRegistrationStep(tgUser *tgbotapi.User, text string, state R
 		}
 
 		// Устанавливаем статус admin для определённого ID
-		if tgUser.ID == 368154534 {
+		if tgUser.ID == 11111111 {
 			user.Status = "admin"
 		}
 
@@ -231,7 +231,7 @@ func (b *Bot) handleRegistrationStep(tgUser *tgbotapi.User, text string, state R
 
 func (b *Bot) handleURL(user *models.User, text string) string {
 	if user.Status != "enable" && user.Status != "admin" {
-		return "Команда /url доступна только для пользователей со статусом enable или admin."
+		return "Здравствуй гость"
 	}
 
 	parts := strings.SplitN(text, " ", 2)
