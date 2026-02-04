@@ -16,15 +16,10 @@ func NewDownloader() *Downloader {
 }
 
 func (d *Downloader) Download(url string) (videoPath, audioPath string, err error) {
-	exePath, err := os.Executable()
-	if err != nil {
-		return "", "", fmt.Errorf("не удалось определить путь к исполняемому файлу: %v", err)
-	}
+	exePath, _ := os.Executable()
 	exeDir := filepath.Dir(exePath)
 	downloadsDir := filepath.Join(exeDir, "downloads")
-	if err := os.MkdirAll(downloadsDir, 0755); err != nil {
-		return "", "", fmt.Errorf("не удалось создать папку downloads: %v", err)
-	}
+	_ = os.MkdirAll(downloadsDir, 0755)
 
 	ytDlpName := "yt-dlp"
 	if runtime.GOOS == "windows" {
@@ -32,195 +27,108 @@ func (d *Downloader) Download(url string) (videoPath, audioPath string, err erro
 	}
 	ytDlpPath := filepath.Join(exeDir, ytDlpName)
 
-	if _, err := os.Stat(ytDlpPath); os.IsNotExist(err) {
-		return "", "", fmt.Errorf("файл %s не найден в директории %s", ytDlpName, exeDir)
-	}
+	// === НАСТРОЙКА ===
+	
+	// 1. ВСТАВЬТЕ СЮДА ВАШ НАСТОЯЩИЙ USER-AGENT ИЗ БРАУЗЕРА
+	// Если куки от Chrome 132, а тут написано 120 - работать НЕ БУДЕТ.
+	userAgent := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
 
-	// Определяем тип ссылки
-	isYouTube := strings.Contains(url, "youtube.com") || strings.Contains(url, "youtu.be")
-	isTikTok := strings.Contains(url, "tiktok.com") || strings.Contains(url, "vm.tiktok.com") || strings.Contains(url, "vt.tiktok.com")
-
-	if !isYouTube && !isTikTok {
-		return "", "", fmt.Errorf("неподдерживаемый URL: %s. Поддерживаются только YouTube и TikTok", url)
-	}
-
-	// Если это TikTok, проверяем, укороченная ли ссылка
-	originalURL := url
-	var fullURL string
-	if isTikTok && (strings.Contains(url, "vm.tiktok.com") || strings.Contains(url, "vt.tiktok.com")) {
-		fullURL, err = d.getFullTikTokURL(url, ytDlpPath)
-		if err != nil {
-			return "", "", fmt.Errorf("не удалось получить полный URL TikTok: %v", err)
-		}
-	} else {
-		fullURL = url
-	}
-
-	// Извлекаем ID видео
-	videoID := extractVideoID(originalURL, isYouTube, ytDlpPath)
-	if videoID == "" {
-		return "", "", fmt.Errorf("не удалось извлечь ID видео: %s", originalURL)
-	}
-
-	// Пользовательский User-Agent
-	userAgent := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-	// Путь к файлу cookies
-	cookiesPath := filepath.Join(exeDir, "tiktok_cookies.txt")
+	// 2. COOKIES
 	cookiesArgs := []string{}
-	if _, err := os.Stat(cookiesPath); err == nil {
-		cookiesArgs = []string{"--cookies", cookiesPath}
+	pathTikTok := filepath.Join(exeDir, "tiktok_cookies.txt")
+	pathGeneric := filepath.Join(exeDir, "cookies.txt")
+
+	if _, err := os.Stat(pathTikTok); err == nil {
+		fmt.Println("🍪 Используем tiktok_cookies.txt")
+		cookiesArgs = []string{"--cookies", pathTikTok}
+	} else if _, err := os.Stat(pathGeneric); err == nil {
+		fmt.Println("🍪 Используем cookies.txt")
+		cookiesArgs = []string{"--cookies", pathGeneric}
 	} else {
-		fmt.Printf("Файл cookies не найден: %s. Это может вызвать ошибку 403 для TikTok.\n", cookiesPath)
+		// Если файла нет, пробуем взять из системы (работает только если Chrome закрыт)
+		fmt.Println("⚠️ Файл cookies не найден, пробуем --cookies-from-browser chrome")
+		cookiesArgs = []string{"--cookies-from-browser", "chrome"}
 	}
 
-	// Дополнительные параметры для TikTok
-	tikTokArgs := []string{
-		"--add-header", "Referer:https://www.tiktok.com/",
-		"--add-header", "Origin:https://www.tiktok.com",
-		"--extractor-args", "tiktok:sys_region=US",
+	// === ПОЛУЧЕНИЕ ДАННЫХ ===
+	fmt.Println("🔄 Анализ ссылки...")
+
+	// Добавляем Referer, чтобы имитировать переход с главной страницы TikTok
+	commonArgs := []string{
+		"--user-agent", userAgent,
+		"--referer", "https://www.tiktok.com/",
+		"--add-header", "Accept-Language:en-US,en;q=0.9",
 		"--no-check-certificates",
 	}
+	commonArgs = append(commonArgs, cookiesArgs...)
 
-	if isYouTube {
-		// Для YouTube скачиваем только аудио
-		audioPath = filepath.Join(downloadsDir, fmt.Sprintf("youtube_%s_audio.mp3", videoID))
-		args := append([]string{"-x", "--audio-format", "mp3", "--audio-quality", "0", "--user-agent", userAgent, "-o", audioPath}, cookiesArgs...)
-		args = append(args, url)
-		cmd := exec.Command(ytDlpPath, args...)
-		cmd.Stderr = os.Stderr
-		fmt.Printf("Выполняется команда для YouTube: %v\n", cmd.Args)
-		if err := cmd.Run(); err != nil {
-			return "", "", fmt.Errorf("ошибка скачивания аудио: %v", err)
+	// Получаем ID и URL
+	metaArgs := append([]string{"--print", "%(id)s", "--print", "%(webpage_url)s"}, commonArgs...)
+	metaArgs = append(metaArgs, url)
+
+	cmd := exec.Command(ytDlpPath, metaArgs...)
+	output, err := cmd.Output()
+
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			// Если ошибка, пробуем очистить кеш и выйти
+			_ = exec.Command(ytDlpPath, "--rm-cache-dir").Run()
+			return "", "", fmt.Errorf("Ошибка TikTok (код %d):\n%s\n👉 Попробуйте обновить User-Agent в коде.", exitErr.ExitCode(), string(exitErr.Stderr))
 		}
-		return "", audioPath, nil
+		return "", "", err
 	}
 
-	// Для TikTok скачиваем видео и аудио
-	videoOutputTemplate := filepath.Join(downloadsDir, fmt.Sprintf("tiktok_%s.%%(ext)s", videoID))
-	altURL := fmt.Sprintf("https://www.tiktok.com/@unknown/video/%s", videoID)
-	args := append([]string{"-f", "bestvideo+bestaudio/best", "--user-agent", userAgent, "-o", videoOutputTemplate}, cookiesArgs...)
-	args = append(args, tikTokArgs...)
-	args = append(args, altURL)
-	cmd := exec.Command(ytDlpPath, args...)
-	cmd.Stderr = os.Stderr
-	fmt.Printf("Выполняется команда для TikTok (видео): %v\n", cmd.Args)
-	if err := cmd.Run(); err != nil {
-		// Пробуем прямой URL, если альтернативный не сработал
-		args = append([]string{"-f", "bestvideo+bestaudio/best", "--user-agent", userAgent, "-o", videoOutputTemplate}, cookiesArgs...)
-		args = append(args, tikTokArgs...)
-		args = append(args, fullURL)
-		cmd = exec.Command(ytDlpPath, args...)
-		cmd.Stderr = os.Stderr
-		fmt.Printf("Выполняется команда для TikTok (прямой URL, видео): %v\n", cmd.Args)
-		if err := cmd.Run(); err != nil {
-			return "", "", fmt.Errorf("ошибка скачивания видео: %v", err)
-		}
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) == 0 || lines[0] == "" {
+		return "", "", fmt.Errorf("пустой ответ от yt-dlp")
+	}
+	videoID := strings.TrimSpace(lines[0])
+	finalURL := url
+	if len(lines) > 1 {
+		finalURL = strings.TrimSpace(lines[1])
+	}
+	fmt.Printf("✅ ID: %s\n", videoID)
+
+	// === СКАЧИВАНИЕ ===
+	
+	prefix := "tiktok"
+	if strings.Contains(url, "youtu") { prefix = "youtube" }
+	
+	videoOut := filepath.Join(downloadsDir, fmt.Sprintf("%s_%s.%%(ext)s", prefix, videoID))
+	audioOut := filepath.Join(downloadsDir, fmt.Sprintf("%s_%s_audio.mp3", prefix, videoID))
+
+	// Если YouTube -> только аудио
+	if prefix == "youtube" {
+		args := append([]string{"-x", "--audio-format", "mp3", "-o", audioOut}, commonArgs...)
+		args = append(args, finalURL)
+		if err := exec.Command(ytDlpPath, args...).Run(); err != nil { return "", "", err }
+		return "", audioOut, nil
 	}
 
-	// Поиск скачанного видео
-	matches, err := filepath.Glob(filepath.Join(downloadsDir, fmt.Sprintf("tiktok_%s.*", videoID)))
-	if err != nil || len(matches) == 0 {
-		return "", "", fmt.Errorf("не найден файл видео")
+	// Скачивание ВИДЕО
+	videoArgs := append([]string{"-f", "bestvideo+bestaudio/best", "-o", videoOut}, commonArgs...)
+	videoArgs = append(videoArgs, finalURL)
+	
+	fmt.Println("⬇️ Скачивание видео...")
+	if err := exec.Command(ytDlpPath, videoArgs...).Run(); err != nil {
+		return "", "", fmt.Errorf("сбой скачивания: %v", err)
 	}
-	videoPath = matches[0]
 
-	// Скачиваем аудио
-	audioPath = filepath.Join(downloadsDir, fmt.Sprintf("tiktok_%s_audio.mp3", videoID))
-	args = append([]string{"-x", "--audio-format", "mp3", "--audio-quality", "0", "--user-agent", userAgent, "-o", audioPath}, cookiesArgs...)
-	args = append(args, tikTokArgs...)
-	args = append(args, altURL)
-	cmd = exec.Command(ytDlpPath, args...)
-	cmd.Stderr = os.Stderr
-	fmt.Printf("Выполняется команда для TikTok (аудио): %v\n", cmd.Args)
-	if err := cmd.Run(); err != nil {
-		return "", "", fmt.Errorf("ошибка скачивания аудио: %v", err)
+	// Проверка результата
+	matches, _ := filepath.Glob(filepath.Join(downloadsDir, fmt.Sprintf("%s_%s.*", prefix, videoID)))
+	if len(matches) > 0 {
+		videoPath = matches[0]
+	} else {
+		return "", "", fmt.Errorf("файл не записался на диск")
 	}
+
+	// Скачивание АУДИО
+	audioArgs := append([]string{"-x", "--audio-format", "mp3", "--audio-quality", "0", "-o", audioOut}, commonArgs...)
+	audioArgs = append(audioArgs, finalURL)
+	
+	fmt.Println("🎵 Извлечение аудио...")
+	_ = exec.Command(ytDlpPath, audioArgs...).Run()
+	audioPath = audioOut
 
 	return videoPath, audioPath, nil
-}
-
-// getFullTikTokURL получает полный URL TikTok из укороченной ссылки
-func (d *Downloader) getFullTikTokURL(shortURL, ytDlpPath string) (string, error) {
-	userAgent := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-	exeDir := filepath.Dir(ytDlpPath)
-	cookiesPath := filepath.Join(exeDir, "tiktok_cookies.txt")
-	cookiesArgs := []string{}
-	if _, err := os.Stat(cookiesPath); err == nil {
-		cookiesArgs = []string{"--cookies", cookiesPath}
-	} else {
-		fmt.Printf("Файл cookies не найден: %s. Это может вызвать ошибку 403 для TikTok.\n", cookiesPath)
-	}
-
-	tikTokArgs := []string{
-		"--add-header", "Referer:https://www.tiktok.com/",
-		"--add-header", "Origin:https://www.tiktok.com",
-		"--extractor-args", "tiktok:sys_region=US",
-		"--no-check-certificates",
-	}
-
-	args := append([]string{"--get-url", "--user-agent", userAgent}, cookiesArgs...)
-	args = append(args, tikTokArgs...)
-	args = append(args, shortURL)
-	cmd := exec.Command(ytDlpPath, args...)
-	cmd.Stderr = os.Stderr
-	fmt.Printf("Выполняется команда для получения URL TikTok: %v\n", cmd.Args)
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("ошибка получения полного URL: %v", err)
-	}
-	fullURL := strings.TrimSpace(string(output))
-	if !strings.Contains(fullURL, "tiktok.com") {
-		return "", fmt.Errorf("полученный URL не является TikTok URL: %s", fullURL)
-	}
-	fmt.Printf("Полный URL TikTok: %s\n", fullURL)
-	return fullURL, nil
-}
-
-// extractVideoID извлекает ID видео из URL YouTube или TikTok
-func extractVideoID(url string, isYouTube bool, ytDlpPath string) string {
-	if isYouTube {
-		if strings.Contains(url, "youtube.com/watch?v=") {
-			parts := strings.Split(url, "v=")
-			if len(parts) > 1 {
-				return strings.Split(parts[1], "&")[0]
-			}
-		} else if strings.Contains(url, "youtu.be/") {
-			parts := strings.Split(url, "youtu.be/")
-			if len(parts) > 1 {
-				return strings.Split(parts[1], "?")[0]
-			}
-		}
-	} else {
-		// Для TikTok извлекаем ID из www.tiktok.com
-		if strings.Contains(url, "www.tiktok.com") {
-			parts := strings.Split(url, "/")
-			for i, part := range parts {
-				if part == "video" && i+1 < len(parts) {
-					return parts[i+1]
-				}
-			}
-		}
-		// Для укороченных или прямых URL TikTok
-		args := []string{"--get-id", "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36", "--no-check-certificates"}
-		exeDir := filepath.Dir(ytDlpPath)
-		cookiesPath := filepath.Join(exeDir, "tiktok_cookies.txt")
-		if _, err := os.Stat(cookiesPath); err == nil {
-			args = append(args, "--cookies", cookiesPath)
-		}
-		args = append(args, url)
-		cmd := exec.Command(ytDlpPath, args...)
-		cmd.Stderr = os.Stderr
-		fmt.Printf("Попытка извлечь ID через yt-dlp: %v\n", cmd.Args)
-		output, err := cmd.Output()
-		if err == nil {
-			videoID := strings.TrimSpace(string(output))
-			if videoID != "" && len(videoID) > 10 { // Проверяем, что ID выглядит как числовой
-				fmt.Printf("Извлечённый videoID: %s\n", videoID)
-				return videoID
-			}
-		}
-		fmt.Printf("Не удалось извлечь ID через yt-dlp: %v\n", err)
-	}
-	fmt.Printf("Не удалось извлечь ID из URL: %s\n", url)
-	return ""
 }
