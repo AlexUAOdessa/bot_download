@@ -1,0 +1,15 @@
+[Unit]
+Description=telegram-bot
+After=network.target
+
+[Service]
+ExecStart=/home/alex/bot_download/telegram-bot
+WorkingDirectory=/home/alex/bot_download/
+User=alex
+Group=alex
+Restart=on-failure
+
+
+[Install]
+WantedBy=multi-user.target
+Alias=telegram-bot.service

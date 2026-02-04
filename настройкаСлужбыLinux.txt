@@ -1,0 +1,18 @@
+Создайте файл службы в каталоге /etc/systemd/system
+ 
+sudo nano /etc/systemd/system/telegram-bot.service
+
+Запуск службу с помощью `systemctl`:
+
+   sudo systemctl start telegram-bot
+
+линк 
+sudo systemctl link /etc/systemd/system/telegram-bot.service
+
+Настройка автозапуска. Чтобы ваш бот запускался при загрузке системы, выполните:
+  
+   sudo systemctl enable telegram-bot
+
+Статус
+
+sudo systemctl status telegram-bot
