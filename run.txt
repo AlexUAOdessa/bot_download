@@ -1,5 +1,7 @@
 export TELEGRAM_BOT_TOKEN="ваш_токен"
 
+#скачать и обновить
 curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o yt-dlp
+
 chmod +x yt-dlp
 chmod +x telegram-bot

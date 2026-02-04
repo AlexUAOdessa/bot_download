@@ -4,7 +4,7 @@ sudo nano /etc/systemd/system/telegram-bot.service
 
 Запуск службу с помощью `systemctl`:
 
-   sudo systemctl start telegram-bot
+   sudo systemctl start RCbot
 
 линк 
 sudo systemctl link /etc/systemd/system/telegram-bot.service
