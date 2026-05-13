@@ -239,34 +239,35 @@ func (b *Bot) handleURL(user *models.User, text string) string {
 		return "Пожалуйста, укажите URL после команды /url."
 	}
 
-	url := parts[1]
-	videoPath, audioPath, err := b.downloader.Download(url)
+	url := strings.TrimSpace(parts[1])
+
+	files, err := b.downloader.Download(user.ID, url)
 	if err != nil {
 		return fmt.Sprintf("Ошибка скачивания: %v", err)
 	}
 
-	// Отправка файлов пользователю
-	chatID := user.ID
-	isYouTube := strings.Contains(url, "youtube.com") || strings.Contains(url, "youtu.be")
+	if len(files) == 0 {
+		return "Скачивание завершилось, но файлы не найдены."
+	}
 
-	if isYouTube {
-		// Для YouTube отправляем только аудио
-		if audioPath != "" {
-			b.sendFile(chatID, audioPath, "audio")
-		}
-	} else {
-		// Для TikTok отправляем видео и аудио
-		if videoPath != "" {
-			b.sendFile(chatID, videoPath, "video")
-		}
-		if audioPath != "" {
-			b.sendFile(chatID, audioPath, "audio")
+	for _, file := range files {
+		lower := strings.ToLower(file)
+
+		if strings.HasSuffix(lower, ".mp4") ||
+			strings.HasSuffix(lower, ".webm") ||
+			strings.HasSuffix(lower, ".mkv") ||
+			strings.HasSuffix(lower, ".mov") {
+			b.sendFile(user.ID, file, "video")
+		} else {
+			b.sendFile(user.ID, file, "document")
 		}
 	}
 
-	// Увеличение счетчика загрузок
+	downloader.DeleteFiles(files)
+
 	b.db.IncrementDownloadCount(user.ID)
-	return "Файлы успешно скачаны и отправлены!"
+
+	return fmt.Sprintf("Файлы успешно скачаны и отправлены! Количество: %d", len(files))
 }
 
 func (b *Bot) sendFile(chatID int64, filePath, fileType string) {
