@@ -1,0 +1,1 @@
+go build -a -ldflags="-s -w" -trimpath -o telegram-bot main.go

@@ -15,8 +15,8 @@ import (
 
 // RegistrationState определяет состояние регистрации пользователя
 type RegistrationState struct {
-	Step   string // "waiting_for_login", "waiting_for_password", или пустая строка (нет регистрации)
-	Login  string // Временное хранение логина
+	Step  string // "waiting_for_login", "waiting_for_password", или пустая строка (нет регистрации)
+	Login string // Временное хранение логина
 }
 
 // Bot структура с добавлением карты для отслеживания состояния регистрации
@@ -132,9 +132,9 @@ func (b *Bot) handleStart(user *models.User) string {
 
 func (b *Bot) handleHelp(user *models.User) string {
 	if user.Status == "admin" {
-		return "Команды:\n/reg - Зарегистрироваться\n/url <YouTube URL> - Скачать видео и аудио\n/users - Показать список пользователей\n/h или /help - Показать это сообщение"
+		return "Команды:\n/reg - Зарегистрироваться\n/url <URL> - Скачать видео и аудио\n/users - Показать список пользователей\n/h или /help - Показать это сообщение"
 	} else if user.Status == "enable" {
-		return "Команды:\n/reg - Зарегистрироваться\n/url <YouTube URL> - Скачать видео и аудио\n/h или /help - Показать это сообщение"
+		return "Команды:\n/reg - Зарегистрироваться\n/url <URL> - Скачать видео и аудио\n/h или /help - Показать это сообщение"
 	}
 	return "Ваш статус: guest. Используйте /reg для регистрации."
 }
@@ -241,6 +241,7 @@ func (b *Bot) handleURL(user *models.User, text string) string {
 
 	url := strings.TrimSpace(parts[1])
 
+	// 1. Скачиваем файлы
 	files, err := b.downloader.Download(user.ID, url)
 	if err != nil {
 		return fmt.Sprintf("Ошибка скачивания: %v", err)
@@ -250,32 +251,94 @@ func (b *Bot) handleURL(user *models.User, text string) string {
 		return "Скачивание завершилось, но файлы не найдены."
 	}
 
-	for _, file := range files {
-		lower := strings.ToLower(file)
+	var allFilesToSend []string
 
-		if strings.HasSuffix(lower, ".mp4") ||
+	// 2. Проверяем каждый файл и подготавливаем к отправке (ZIP + разбиение при необходимости)
+	for _, file := range files {
+		log.Printf("🔄 Обработка скачанного файла в bot.go: %s", file)
+
+		prepared, prepErr := downloader.PrepareFilesForSending(file, 45*1024*1024) // ~45 МБ
+		if prepErr != nil {
+			log.Printf("❌ Ошибка при подготовке файла: %v. Отправляем оригинал.", prepErr)
+			allFilesToSend = append(allFilesToSend, file)
+			continue
+		}
+
+		log.Printf("📤 Получено файлов/частей для отправки: %d", len(prepared))
+		allFilesToSend = append(allFilesToSend, prepared...)
+	}
+
+	// 3. Отправляем файлы пользователю
+	totalParts := len(allFilesToSend)
+	isSplit := totalParts > len(files) // Если частей стало больше, значит была разбивка
+
+	for i, file := range allFilesToSend {
+		lower := strings.ToLower(file)
+		var caption string
+
+		if isSplit {
+			// Файл был разрезан на части
+			if strings.Contains(lower, ".zip") {
+				caption = fmt.Sprintf(
+					"📦 Видео большое — упаковано в ZIP и разделено на части.\n"+
+						"Часть %d из %d\n\n"+
+						"📱 iPhone / iPad:\n"+
+						"Откройте приложение Documents → найдите папку с частями →\n"+
+						"выделите все части → «Объединить» / Join.\n\n"+
+						"💻 Windows:\n"+
+						"`copy /b *.zip_part_* video.zip`\n\n"+
+						"💻 Linux / Mac:\n"+
+						"`cat *.zip_part_* > video.zip`\n\n"+
+						"После сборки просто откройте video.zip",
+					i+1, totalParts,
+				)
+			} else {
+				caption = fmt.Sprintf("📦 Файл разделён на части.\nЧасть %d из %d\n\n💡 Склеить:\n\nWindows:\n`copy /b *.part_* video.mp4`\n\nLinux / Mac:\n`cat *.part_* > video.mp4`", i+1, totalParts)
+			}
+		} else {
+			// Один файл
+			if strings.HasSuffix(lower, ".zip") {
+				caption = "📦 Видео большое — упаковано в ZIP.\nПросто откройте архив двойным кликом."
+			} else {
+				caption = ""
+			}
+		}
+
+		// Отправляем
+		if !isSplit && (strings.HasSuffix(lower, ".mp4") ||
 			strings.HasSuffix(lower, ".webm") ||
 			strings.HasSuffix(lower, ".mkv") ||
-			strings.HasSuffix(lower, ".mov") {
-			b.sendFile(user.ID, file, "video")
+			strings.HasSuffix(lower, ".mov")) {
+			b.sendFileWithCaption(user.ID, file, "video", caption)
 		} else {
-			b.sendFile(user.ID, file, "document")
+			// ZIP и все части отправляем как документы
+			b.sendFileWithCaption(user.ID, file, "document", caption)
 		}
 	}
 
+	// 4. Очищаем все временные файлы
 	downloader.DeleteFiles(files)
+	downloader.DeleteFiles(allFilesToSend)
 
+	// 5. Увеличиваем счетчик загрузок
 	b.db.IncrementDownloadCount(user.ID)
 
+	if isSplit {
+		return fmt.Sprintf("Файл был слишком большим, обработан и отправлен в %d частях!", totalParts)
+	}
 	return fmt.Sprintf("Файлы успешно скачаны и отправлены! Количество: %d", len(files))
 }
 
-func (b *Bot) sendFile(chatID int64, filePath, fileType string) {
+func (b *Bot) sendFileWithCaption(chatID int64, filePath, fileType, caption string) {
 	var file tgbotapi.Chattable
 	if fileType == "video" {
-		file = tgbotapi.NewVideo(chatID, tgbotapi.FilePath(filePath))
+		vid := tgbotapi.NewVideo(chatID, tgbotapi.FilePath(filePath))
+		vid.Caption = caption
+		file = vid
 	} else {
-		file = tgbotapi.NewDocument(chatID, tgbotapi.FilePath(filePath))
+		doc := tgbotapi.NewDocument(chatID, tgbotapi.FilePath(filePath))
+		doc.Caption = caption
+		file = doc
 	}
 	_, err := b.bot.Send(file)
 	if err != nil {
