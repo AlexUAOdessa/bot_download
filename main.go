@@ -11,29 +11,30 @@ import (
 )
 
 func main() {
-	// Загрузка переменных окружения
+	// Загрузка переменных окружения из файла .env
 	err := godotenv.Load()
 	if err != nil {
 		log.Fatalf("Ошибка загрузки файла .env: %v", err)
 	}
 
-	// Инициализация базы данных
+	// Инициализация базы данных SQLite
 	database, err := db.InitDB("users.db")
 	if err != nil {
 		log.Fatalf("Ошибка инициализации базы данных: %v", err)
 	}
 	defer database.Close()
 
-	// Инициализация загрузчика
-	downloader := downloader.NewDownloader()
+	// Инициализация загрузчика медиафайлов
+	dl := downloader.NewDownloader()
 
-	// Инициализация и запуск бота
+	// Получение токена Telegram-бота из переменных окружения
 	botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
 	if botToken == "" {
-		log.Fatal("TELEGRAM_BOT_TOKEN не установлен")
+		log.Fatal("TELEGRAM_BOT_TOKEN не установлен в переменных окружения")
 	}
 
-	err = bot.StartBot(botToken, database, downloader)
+	// Запуск Telegram-бота
+	err = bot.StartBot(botToken, database, dl)
 	if err != nil {
 		log.Fatalf("Ошибка запуска бота: %v", err)
 	}

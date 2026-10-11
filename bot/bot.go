@@ -3,6 +3,9 @@ package bot
 import (
 	"fmt"
 	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"telegram-bot/db"
@@ -106,7 +109,6 @@ func (b *Bot) registerUser(tgUser *tgbotapi.User) *models.User {
 	// Проверяем, существует ли пользователь в базе
 	existingUser, err := b.db.GetUser(tgUser.ID)
 	if err == nil && existingUser.ID != 0 {
-		// Пользователь уже существует, возвращаем его данные
 		return existingUser
 	}
 
@@ -159,7 +161,6 @@ func (b *Bot) handleUsers(user *models.User) string {
 }
 
 func (b *Bot) handleRegister(tgUser *tgbotapi.User) string {
-	// Проверяем, существует ли пользователь в базе
 	user, err := b.db.GetUser(tgUser.ID)
 	if err == nil && user.ID != 0 {
 		if user.Status == "enable" || user.Status == "admin" {
@@ -167,7 +168,6 @@ func (b *Bot) handleRegister(tgUser *tgbotapi.User) string {
 		}
 	}
 
-	// Инициируем процесс регистрации
 	b.stateMutex.Lock()
 	b.registrationState[tgUser.ID] = RegistrationState{Step: "waiting_for_login"}
 	b.stateMutex.Unlock()
@@ -181,7 +181,6 @@ func (b *Bot) handleRegistrationStep(tgUser *tgbotapi.User, text string, state R
 
 	switch state.Step {
 	case "waiting_for_login":
-		// Сохраняем логин и запрашиваем пароль
 		b.registrationState[tgUser.ID] = RegistrationState{
 			Step:  "waiting_for_password",
 			Login: text,
@@ -189,14 +188,11 @@ func (b *Bot) handleRegistrationStep(tgUser *tgbotapi.User, text string, state R
 		return "Пожалуйста, введите пароль."
 
 	case "waiting_for_password":
-		// Проверяем логин и пароль
 		if state.Login != "Ukraine" || text != "Odesa" {
-			// Очищаем состояние
 			delete(b.registrationState, tgUser.ID)
 			return "Неверный логин или пароль. Логин должен быть 'Ukraine', а пароль — 'Odesa'. Попробуйте снова с /reg."
 		}
 
-		// Создаём или обновляем пользователя
 		user := &models.User{
 			ID:            tgUser.ID,
 			FirstName:     tgUser.FirstName,
@@ -205,7 +201,6 @@ func (b *Bot) handleRegistrationStep(tgUser *tgbotapi.User, text string, state R
 			DownloadCount: 0,
 		}
 
-		// Устанавливаем статус admin для определённого ID
 		if tgUser.ID == 368154534 {
 			user.Status = "admin"
 		}
@@ -213,22 +208,20 @@ func (b *Bot) handleRegistrationStep(tgUser *tgbotapi.User, text string, state R
 		err := b.db.RegisterUser(user)
 		if err != nil {
 			log.Printf("Ошибка при регистрации пользователя: %v", err)
-			// Очищаем состояние
 			delete(b.registrationState, tgUser.ID)
 			return "Ошибка при регистрации. Попробуйте позже."
 		}
 
-		// Очищаем состояние после успешной регистрации
 		delete(b.registrationState, tgUser.ID)
 		return fmt.Sprintf("Регистрация успешна, %s! Ваш статус: %s", user.FirstName, user.Status)
 
 	default:
-		// На случай ошибки в состоянии
 		delete(b.registrationState, tgUser.ID)
 		return "Ошибка в процессе регистрации. Попробуйте снова с /reg."
 	}
 }
 
+// handleURL обрабатывает команду скачивания по ссылке
 func (b *Bot) handleURL(user *models.User, text string) string {
 	if user.Status != "enable" && user.Status != "admin" {
 		return "Команда /url доступна только для пользователей со статусом enable или admin."
@@ -241,7 +234,7 @@ func (b *Bot) handleURL(user *models.User, text string) string {
 
 	url := strings.TrimSpace(parts[1])
 
-	// 1. Скачиваем файлы
+	// 1. Скачиваем файлы на сервер
 	files, err := b.downloader.Download(user.ID, url)
 	if err != nil {
 		return fmt.Sprintf("Ошибка скачивания: %v", err)
@@ -251,82 +244,104 @@ func (b *Bot) handleURL(user *models.User, text string) string {
 		return "Скачивание завершилось, но файлы не найдены."
 	}
 
-	var allFilesToSend []string
+	// Лимит Telegram для отправки файлов напрямую (50 МБ, берем 48 МБ для безопасности)
+	const maxTelegramSize = 48 * 1024 * 1024
 
-	// 2. Проверяем каждый файл и подготавливаем к отправке (ZIP + разбиение при необходимости)
+	// 2. Обрабатываем каждый скачанный файл
 	for _, file := range files {
-		log.Printf("🔄 Обработка скачанного файла в bot.go: %s", file)
-
-		prepared, prepErr := downloader.PrepareFilesForSending(file, 45*1024*1024) // ~45 МБ
-		if prepErr != nil {
-			log.Printf("❌ Ошибка при подготовке файла: %v. Отправляем оригинал.", prepErr)
-			allFilesToSend = append(allFilesToSend, file)
+		fileInfo, err := os.Stat(file)
+		if err != nil {
+			log.Printf("❌ Ошибка получения информации о файле %s: %v", file, err)
 			continue
 		}
 
-		log.Printf("📤 Получено файлов/частей для отправки: %d", len(prepared))
-		allFilesToSend = append(allFilesToSend, prepared...)
-	}
+		fileSize := fileInfo.Size()
+		fileName := filepath.Base(file)
+		fileSizeMB := float64(fileSize) / (1024 * 1024)
 
-	// 3. Отправляем файлы пользователю
-	totalParts := len(allFilesToSend)
-	isSplit := totalParts > len(files) // Если частей стало больше, значит была разбивка
+		log.Printf("📁 Проверка файла: %s (%.2f МБ)", fileName, fileSizeMB)
 
-	for i, file := range allFilesToSend {
-		lower := strings.ToLower(file)
-		var caption string
+		// Если файл больше 50 МБ — отправляем на Google Диск в папку music
+		if fileSize > maxTelegramSize {
+			log.Printf("⚠️ Файл превышает 50 МБ. Загружаем на Google Диск в папку 'music'...")
 
-		if isSplit {
-			// Файл был разрезан на части
-			if strings.Contains(lower, ".zip") {
-				caption = fmt.Sprintf(
-					"📦 Видео большое — упаковано в ZIP и разделено на части.\n"+
-						"Часть %d из %d\n\n"+
-						"📱 iPhone / iPad:\n"+
-						"Откройте приложение Documents → найдите папку с частями →\n"+
-						"выделите все части → «Объединить» / Join.\n\n"+
-						"💻 Windows:\n"+
-						"`copy /b *.zip_part_* video.zip`\n\n"+
-						"💻 Linux / Mac:\n"+
-						"`cat *.zip_part_* > video.zip`\n\n"+
-						"После сборки просто откройте video.zip",
-					i+1, totalParts,
-				)
-			} else {
-				caption = fmt.Sprintf("📦 Файл разделён на части.\nЧасть %d из %d\n\n💡 Склеить:\n\nWindows:\n`copy /b *.part_* video.mp4`\n\nLinux / Mac:\n`cat *.part_* > video.mp4`", i+1, totalParts)
+			// Проверяем наличие папки music на диске и создаем при необходимости
+			err = ensureGoogleDriveMusicFolder()
+			if err != nil {
+				log.Printf("❌ Ошибка создания/проверки папки music: %v", err)
+				b.bot.Send(tgbotapi.NewMessage(user.ID, fmt.Sprintf("Файл %s более 50 МБ, но не удалось создать папку music на Google Диске.", fileName)))
+				continue
 			}
-		} else {
-			// Один файл
-			if strings.HasSuffix(lower, ".zip") {
-				caption = "📦 Видео большое — упаковано в ZIP.\nПросто откройте архив двойным кликом."
-			} else {
-				caption = ""
-			}
-		}
 
-		// Отправляем
-		if !isSplit && (strings.HasSuffix(lower, ".mp4") ||
-			strings.HasSuffix(lower, ".webm") ||
-			strings.HasSuffix(lower, ".mkv") ||
-			strings.HasSuffix(lower, ".mov")) {
-			b.sendFileWithCaption(user.ID, file, "video", caption)
+			// Загружаем файл и получаем публичную ссылку
+			driveLink, err := uploadToGoogleDriveMusic(file, fileName)
+			if err != nil {
+				log.Printf("❌ Ошибка выгрузки на Google Диск: %v", err)
+				b.bot.Send(tgbotapi.NewMessage(user.ID, fmt.Sprintf("Ошибка загрузки файла %s на Google Диск.", fileName)))
+				continue
+			}
+
+			// Отправляем пользователю ссылку на Google Диск
+			msgText := fmt.Sprintf("📦 Файл *%s* (%.2f МБ) превышает лимит Telegram.\n\n🔗 Скачать с Google Диска (папка music):\n%s", fileName, fileSizeMB, driveLink)
+			msg := tgbotapi.NewMessage(user.ID, msgText)
+			msg.ParseMode = "Markdown"
+			b.bot.Send(msg)
+
 		} else {
-			// ZIP и все части отправляем как документы
-			b.sendFileWithCaption(user.ID, file, "document", caption)
+			// Если файл меньше или равен 50 МБ — отправляем напрямую в Telegram
+			log.Printf("✅ Файл в пределах лимита. Отправляем в Telegram...")
+			lower := strings.ToLower(file)
+			if strings.HasSuffix(lower, ".mp4") ||
+				strings.HasSuffix(lower, ".webm") ||
+				strings.HasSuffix(lower, ".mkv") ||
+				strings.HasSuffix(lower, ".mov") {
+				b.sendFileWithCaption(user.ID, file, "video", "")
+			} else {
+				b.sendFileWithCaption(user.ID, file, "document", "")
+			}
 		}
 	}
 
-	// 4. Очищаем все временные файлы
+	// 3. Очищаем временные локальные файлы
 	downloader.DeleteFiles(files)
-	downloader.DeleteFiles(allFilesToSend)
 
-	// 5. Увеличиваем счетчик загрузок
+	// 4. Увеличиваем счетчик загрузок пользователя
 	b.db.IncrementDownloadCount(user.ID)
 
-	if isSplit {
-		return fmt.Sprintf("Файл был слишком большим, обработан и отправлен в %d частях!", totalParts)
+	return "Обработка и отправка файлов завершена!"
+}
+
+// ensureGoogleDriveMusicFolder проверяет наличие папки music и создает её при отсутствии
+func ensureGoogleDriveMusicFolder() error {
+	cmd := exec.Command("rclone", "lsf", "disk_bot:music", "--dirs-only")
+	output, err := cmd.CombinedOutput()
+
+	outputStr := string(output)
+	if err != nil || !strings.Contains(outputStr, "music") {
+		log.Printf("📁 Папка 'music' не найдена на Google Диске. Создаем...")
+		mkdirCmd := exec.Command("rclone", "mkdir", "disk_bot:music")
+		if mkdirErr := mkdirCmd.Run(); mkdirErr != nil {
+			return fmt.Errorf("не удалось создать папку music: %v", mkdirErr)
+		}
+		log.Println("✅ Папка 'music' успешно создана на Google Диске.")
 	}
-	return fmt.Sprintf("Файлы успешно скачаны и отправлены! Количество: %d", len(files))
+	return nil
+}
+
+// uploadToGoogleDriveMusic загружает файл в папку music и возвращает публичную ссылку
+func uploadToGoogleDriveMusic(filePath, fileName string) (string, error) {
+	cmd := exec.Command("rclone", "copyto", filePath, "disk_bot:music/"+fileName)
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("ошибка копирования rclone: %v", err)
+	}
+
+	linkCmd := exec.Command("rclone", "link", "disk_bot:music/"+fileName)
+	linkOutput, err := linkCmd.Output()
+	if err != nil {
+		return "https://drive.google.com (файл загружен в папку music)", nil
+	}
+
+	return strings.TrimSpace(string(linkOutput)), nil
 }
 
 func (b *Bot) sendFileWithCaption(chatID int64, filePath, fileType, caption string) {
