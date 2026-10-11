@@ -106,13 +106,11 @@ func (b *Bot) handleUpdates(updates tgbotapi.UpdatesChannel) {
 }
 
 func (b *Bot) registerUser(tgUser *tgbotapi.User) *models.User {
-	// Проверяем, существует ли пользователь в базе
 	existingUser, err := b.db.GetUser(tgUser.ID)
 	if err == nil && existingUser.ID != 0 {
 		return existingUser
 	}
 
-	// Создаём нового пользователя
 	user := &models.User{
 		ID:            tgUser.ID,
 		FirstName:     tgUser.FirstName,
@@ -234,13 +232,17 @@ func (b *Bot) handleURL(user *models.User, text string) string {
 
 	url := strings.TrimSpace(parts[1])
 
+	log.Printf("📥 Начало скачивания для userID: %d, URL: %s", user.ID, url)
+
 	// 1. Скачиваем файлы на сервер
 	files, err := b.downloader.Download(user.ID, url)
 	if err != nil {
+		log.Printf("❌ Ошибка скачивания через downloader: %v", err)
 		return fmt.Sprintf("Ошибка скачивания: %v", err)
 	}
 
 	if len(files) == 0 {
+		log.Println("⚠️ Скачивание завершилось, но файлы не найдены.")
 		return "Скачивание завершилось, но файлы не найдены."
 	}
 
@@ -259,37 +261,43 @@ func (b *Bot) handleURL(user *models.User, text string) string {
 		fileName := filepath.Base(file)
 		fileSizeMB := float64(fileSize) / (1024 * 1024)
 
-		log.Printf("📁 Проверка файла: %s (%.2f МБ)", fileName, fileSizeMB)
+		log.Printf("📁 Анализ файла: %s (Размер: %.2f МБ)", fileName, fileSizeMB)
 
 		// Если файл больше 50 МБ — отправляем на Google Диск в папку music
 		if fileSize > maxTelegramSize {
-			log.Printf("⚠️ Файл превышает 50 МБ. Загружаем на Google Диск в папку 'music'...")
+			log.Printf("⚠️ Файл '%s' (%.2f МБ) превышает лимит 50 МБ. Начинаем выгрузку на Google Диск...", fileName, fileSizeMB)
 
 			// Проверяем наличие папки music на диске и создаем при необходимости
 			err = ensureGoogleDriveMusicFolder()
 			if err != nil {
-				log.Printf("❌ Ошибка создания/проверки папки music: %v", err)
-				b.bot.Send(tgbotapi.NewMessage(user.ID, fmt.Sprintf("Файл %s более 50 МБ, но не удалось создать папку music на Google Диске.", fileName)))
+				log.Printf("❌ [CRITICAL] Ошибка создания/проверки папки music на Google Диске: %v", err)
+				b.bot.Send(tgbotapi.NewMessage(user.ID, fmt.Sprintf("Файл %s более 50 МБ, но произошла ошибка создания папки music на Google Диске.", fileName)))
 				continue
 			}
 
 			// Загружаем файл и получаем публичную ссылку
 			driveLink, err := uploadToGoogleDriveMusic(file, fileName)
 			if err != nil {
-				log.Printf("❌ Ошибка выгрузки на Google Диск: %v", err)
-				b.bot.Send(tgbotapi.NewMessage(user.ID, fmt.Sprintf("Ошибка загрузки файла %s на Google Диск.", fileName)))
+				log.Printf("❌ [CRITICAL] Ошибка выгрузки файла '%s' на Google Диск: %v", fileName, err)
+				b.bot.Send(tgbotapi.NewMessage(user.ID, fmt.Sprintf("Ошибка загрузки файла %s на Google Диск. Проверьте лог сервера.", fileName)))
 				continue
 			}
 
-			// Отправляем пользователю ссылку на Google Диск
-			msgText := fmt.Sprintf("📦 Файл *%s* (%.2f МБ) превышает лимит Telegram.\n\n🔗 Скачать с Google Диска (папка music):\n%s", fileName, fileSizeMB, driveLink)
+			log.Printf("✅ Файл '%s' успешно выгружен. Ссылка получена: %s", fileName, driveLink)
+
+			// Отправляем пользователю ссылку обычным текстом (без Markdown, чтобы избежать ошибок с символами подчеркивания _)
+			msgText := fmt.Sprintf("📦 Файл %s (%.2f МБ) превышает лимит Telegram.\n\n🔗 Скачать с Google Диска (папка music):\n%s", fileName, fileSizeMB, driveLink)
 			msg := tgbotapi.NewMessage(user.ID, msgText)
-			msg.ParseMode = "Markdown"
-			b.bot.Send(msg)
+			_, sendErr := b.bot.Send(msg)
+			if sendErr != nil {
+				log.Printf("❌ Ошибка отправки сообщения пользователю в Telegram: %v", sendErr)
+			} else {
+				log.Println("✅ Ссылка успешно отправлена пользователю в Telegram.")
+			}
 
 		} else {
 			// Если файл меньше или равен 50 МБ — отправляем напрямую в Telegram
-			log.Printf("✅ Файл в пределах лимита. Отправляем в Telegram...")
+			log.Printf("✅ Файл '%s' в пределах лимита (<=50МБ). Отправляем в Telegram...", fileName)
 			lower := strings.ToLower(file)
 			if strings.HasSuffix(lower, ".mp4") ||
 				strings.HasSuffix(lower, ".webm") ||
@@ -308,40 +316,59 @@ func (b *Bot) handleURL(user *models.User, text string) string {
 	// 4. Увеличиваем счетчик загрузок пользователя
 	b.db.IncrementDownloadCount(user.ID)
 
+	log.Println("🏁 Обработка и отправка всех файлов по URL завершена.")
 	return "Обработка и отправка файлов завершена!"
 }
 
-// ensureGoogleDriveMusicFolder проверяет наличие папки music и создает её при отсутствии
+// ensureGoogleDriveMusicFolder проверяет наличие папки music и создает её при отсутствии с логированием выводов rclone
 func ensureGoogleDriveMusicFolder() error {
+	log.Println("🔍 Проверяем наличие папки 'music' на Google Диске через rclone...")
 	cmd := exec.Command("rclone", "lsf", "disk_bot:music", "--dirs-only")
 	output, err := cmd.CombinedOutput()
-
 	outputStr := string(output)
+
+	log.Printf("📄 Ответ rclone lsf music: err=%v, output=%s", err, strings.TrimSpace(outputStr))
+
 	if err != nil || !strings.Contains(outputStr, "music") {
-		log.Printf("📁 Папка 'music' не найдена на Google Диске. Создаем...")
+		log.Println("📁 Папка 'music' не найдена. Создаем через 'rclone mkdir disk_bot:music'...")
 		mkdirCmd := exec.Command("rclone", "mkdir", "disk_bot:music")
-		if mkdirErr := mkdirCmd.Run(); mkdirErr != nil {
+		mkdirOutput, mkdirErr := mkdirCmd.CombinedOutput()
+		if mkdirErr != nil {
+			log.Printf("❌ Ошибка выполнения rclone mkdir: %v, вывод: %s", mkdirErr, string(mkdirOutput))
 			return fmt.Errorf("не удалось создать папку music: %v", mkdirErr)
 		}
 		log.Println("✅ Папка 'music' успешно создана на Google Диске.")
+	} else {
+		log.Println("✅ Папка 'music' уже существует на Google Диске.")
 	}
 	return nil
 }
 
-// uploadToGoogleDriveMusic загружает файл в папку music и возвращает публичную ссылку
+// uploadToGoogleDriveMusic загружает файл в папку music и возвращает публичную ссылку с полным логированием ошибок rclone
 func uploadToGoogleDriveMusic(filePath, fileName string) (string, error) {
-	cmd := exec.Command("rclone", "copyto", filePath, "disk_bot:music/"+fileName)
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("ошибка копирования rclone: %v", err)
-	}
+	target := fmt.Sprintf("disk_bot:music/%s", fileName)
+	log.Printf("📤 Копируем файл '%s' на Google Диск в '%s'...", filePath, target)
 
-	linkCmd := exec.Command("rclone", "link", "disk_bot:music/"+fileName)
-	linkOutput, err := linkCmd.Output()
-	if err != nil {
+	copyCmd := exec.Command("rclone", "copyto", filePath, target)
+	copyOutput, copyErr := copyCmd.CombinedOutput()
+	if copyErr != nil {
+		log.Printf("❌ Ошибка rclone copyto: %v, вывод: %s", copyErr, string(copyOutput))
+		return "", fmt.Errorf("rclone copyto error: %v (output: %s)", copyErr, string(copyOutput))
+	}
+	log.Printf("✅ Файл успешно скопирован на Google Диск. Вывод: %s", strings.TrimSpace(string(copyOutput)))
+
+	log.Printf("🔗 Запрашиваем публичную ссылку через 'rclone link %s'...", target)
+	linkCmd := exec.Command("rclone", "link", target)
+	linkOutput, linkErr := linkCmd.CombinedOutput()
+	linkStr := strings.TrimSpace(string(linkOutput))
+
+	if linkErr != nil || linkStr == "" {
+		log.Printf("⚠️ Не удалось получить прямую ссылку через rclone link (err=%v, output=%s). Возвращаем базовую ссылку на диск.", linkErr, linkStr)
 		return "https://drive.google.com (файл загружен в папку music)", nil
 	}
 
-	return strings.TrimSpace(string(linkOutput)), nil
+	log.Printf("✅ Получена публичная ссылка: %s", linkStr)
+	return linkStr, nil
 }
 
 func (b *Bot) sendFileWithCaption(chatID int64, filePath, fileType, caption string) {
@@ -357,7 +384,9 @@ func (b *Bot) sendFileWithCaption(chatID int64, filePath, fileType, caption stri
 	}
 	_, err := b.bot.Send(file)
 	if err != nil {
-		log.Printf("Ошибка отправки файла %s: %v", filePath, err)
+		log.Printf("❌ Ошибка отправки файла %s в Telegram: %v", filePath, err)
+	} else {
+		log.Printf("✅ Файл успешно отправлен в Telegram: %s", filePath)
 	}
 }
 
