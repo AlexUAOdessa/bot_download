@@ -22,6 +22,7 @@ func NewDownloader() *Downloader {
 // Возвращает слайс путей к скачанным файлам во временной директории или ошибку.
 func (d *Downloader) Download(userID int64, rawURL string) ([]string, error) {
 
+	// Определяем директорию, в которой находится исполняемый файл бота
 	exePath, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("ошибка получения пути exe: %v", err)
@@ -29,7 +30,7 @@ func (d *Downloader) Download(userID int64, rawURL string) ([]string, error) {
 
 	exeDir := filepath.Dir(exePath)
 
-	// Создание уникальной папки для скачивания пользователя
+	// Создание уникальной изолированной папки для скачивания конкретного пользователя
 	userDir := filepath.Join(
 		exeDir,
 		"downloads",
@@ -42,11 +43,13 @@ func (d *Downloader) Download(userID int64, rawURL string) ([]string, error) {
 		return nil, fmt.Errorf("ошибка создания папки: %v", err)
 	}
 
+	// Определение имени утилиты yt-dlp в зависимости от операционной системы
 	ytDlpName := "yt-dlp"
 	if runtime.GOOS == "windows" {
 		ytDlpName = "yt-dlp.exe"
 	}
 
+	// Проверяем наличие yt-dlp локально в папке бота или в системном PATH
 	ytDlpPath := filepath.Join(exeDir, ytDlpName)
 	if _, err := os.Stat(ytDlpPath); err != nil {
 		pathFromEnv, lookErr := exec.LookPath(ytDlpName)
@@ -59,6 +62,7 @@ func (d *Downloader) Download(userID int64, rawURL string) ([]string, error) {
 	url := cleanURL(rawURL)
 	secUserID := extractSecUserID(rawURL)
 
+	// Базовые аргументы для обхода ограничений и стабильной загрузки
 	commonArgs := []string{
 		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
 		"--referer", "https://www.tiktok.com/",
@@ -76,9 +80,10 @@ func (d *Downloader) Download(userID int64, rawURL string) ([]string, error) {
 		"--no-playlist-reverse",
 	}
 
+	// Добавляем аргументы файлов cookies, если они присутствуют в папке с ботом
 	commonArgs = append(commonArgs, buildCookiesArgs(exeDir)...)
 
-	// Скачивание с YouTube (извлечение аудио MP3)
+	// Скачивание с YouTube (извлечение аудио в формате MP3)
 	if isYouTubeURL(url) {
 		fmt.Println("⬇️ Загрузка с YouTube...")
 
@@ -105,7 +110,7 @@ func (d *Downloader) Download(userID int64, rawURL string) ([]string, error) {
 		return collectFiles(userDir)
 	}
 
-	// Скачивание с TikTok / других сервисов (видео до 720p)
+	// Скачивание с TikTok / других видеохостингов (ограничение до 720p)
 	fmt.Println("⬇️ Загрузка TikTok / Обычная загрузка...")
 
 	outputTemplate := filepath.Join(
@@ -113,9 +118,11 @@ func (d *Downloader) Download(userID int64, rawURL string) ([]string, error) {
 		"video_%(playlist_index)s_%(id)s.%(ext)s",
 	)
 
+	// Использование флага --recode-video mp4 гарантирует конвертацию в стандартные
+	// кодеки H.264 (видео) и AAC (аудио), что решает проблемы воспроизведения на iPad и Windows
 	args := []string{
 		"-f", "bv*[height<=720]+ba/b[height<=720]/best[height<=720]/best",
-		"--merge-output-format", "mp4",
+		"--recode-video", "mp4",
 		"-o", outputTemplate,
 	}
 
@@ -124,6 +131,7 @@ func (d *Downloader) Download(userID int64, rawURL string) ([]string, error) {
 
 	err = runYtDlp(ytDlpPath, args)
 
+	// Обработка ошибок и резервные сценарии (fallback) для TikTok
 	if err != nil {
 		errText := err.Error()
 
@@ -131,11 +139,11 @@ func (d *Downloader) Download(userID int64, rawURL string) ([]string, error) {
 			profileURL := extractTikTokProfileFromText(errText)
 
 			if profileURL != "" {
-				fmt.Println("⚠️ Плейлист TikTok не поддерживается напрямую, пробуем профиль...")
+				fmt.Println("⚠️ Плейлист TikTok напрямую не поддерживается, пробуем профиль...")
 
 				profileArgs := []string{
 					"-f", "bv*[height<=720]+ba/b[height<=720]/best[height<=720]/best",
-					"--merge-output-format", "mp4",
+					"--recode-video", "mp4",
 					"-o", outputTemplate,
 				}
 
@@ -153,11 +161,11 @@ func (d *Downloader) Download(userID int64, rawURL string) ([]string, error) {
 					}
 
 					if secUserID != "" {
-						fmt.Println("➡️ Резервный вариант загрузки (tiktokuser)...")
+						fmt.Println("➡️ Резервный вариант загрузки по tiktokuser...")
 
 						userIDArgs := []string{
 							"-f", "bv*[height<=720]+ba/b[height<=720]/best[height<=720]/best",
-							"--merge-output-format", "mp4",
+							"--recode-video", "mp4",
 							"-o", outputTemplate,
 						}
 
@@ -183,6 +191,7 @@ func (d *Downloader) Download(userID int64, rawURL string) ([]string, error) {
 	return collectFiles(userDir)
 }
 
+// runYtDlp выполняет системную команду запуска yt-dlp
 func runYtDlp(ytDlpPath string, args []string) error {
 	cmd := exec.Command(ytDlpPath, args...)
 	output, err := cmd.CombinedOutput()
@@ -198,6 +207,7 @@ func runYtDlp(ytDlpPath string, args []string) error {
 	return nil
 }
 
+// buildCookiesArgs проверяет наличие файлов куки (cookies.txt) в папке бота
 func buildCookiesArgs(exeDir string) []string {
 	pathTikTok := filepath.Join(exeDir, "tiktok_cookies.txt")
 	pathGeneric := filepath.Join(exeDir, "cookies.txt")
@@ -211,6 +221,7 @@ func buildCookiesArgs(exeDir string) []string {
 	return []string{}
 }
 
+// cleanURL очищает переданную ссылку от лишних GET-параметров
 func cleanURL(raw string) string {
 	u := strings.TrimSpace(raw)
 	if strings.Contains(u, "?") {
@@ -222,11 +233,13 @@ func cleanURL(raw string) string {
 	return u
 }
 
+// isYouTubeURL проверяет, относится ли ссылка к YouTube
 func isYouTubeURL(u string) bool {
 	u = strings.ToLower(u)
 	return strings.Contains(u, "youtube.com") || strings.Contains(u, "youtu.be")
 }
 
+// extractTikTokProfileFromText извлекает ссылку на профиль TikTok из текста ошибки
 func extractTikTokProfileFromText(text string) string {
 	marker := "https://www.tiktok.com/@"
 	idx := strings.Index(text, marker)
@@ -248,6 +261,7 @@ func extractTikTokProfileFromText(text string) string {
 	return strings.TrimSpace(part)
 }
 
+// extractSecUserID извлекает идентификатор безопасности пользователя TikTok
 func extractSecUserID(raw string) string {
 	marker := "sec_user_id="
 	idx := strings.Index(raw, marker)
@@ -265,6 +279,7 @@ func extractSecUserID(raw string) string {
 	return strings.TrimSpace(part)
 }
 
+// collectFiles собирает пути ко всем скачанным файлам в указанной временной директории
 func collectFiles(dir string) ([]string, error) {
 	var result []string
 	entries, err := os.ReadDir(dir)
@@ -284,11 +299,12 @@ func collectFiles(dir string) ([]string, error) {
 	return result, nil
 }
 
+// DeleteFiles удаляет локальные временные файлы после отправки или выгрузки
 func DeleteFiles(files []string) {
 	for _, file := range files {
 		err := os.Remove(file)
 		if err != nil {
-			fmt.Println("Ошибка удаления файла:", err)
+			fmt.Println("Ошибка удаления локального файла:", err)
 		}
 	}
 }

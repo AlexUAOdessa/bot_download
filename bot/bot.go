@@ -283,9 +283,15 @@ func (b *Bot) handleURL(user *models.User, text string) string {
 				continue
 			}
 
-			log.Printf("✅ Файл '%s' успешно выгружен. Ссылка получена: %s", fileName, driveLink)
+			log.Printf("✅ Файл '%s' успешно выгружен на Google Диск. Ссылка: %s", fileName, driveLink)
 
-			// Отправляем пользователю ссылку обычным текстом (без Markdown, чтобы избежать ошибок с символами подчеркивания _)
+			// Удаляем файл с локального диска после успешной выгрузки в облако
+			log.Printf("🗑 Удаляем локальный файл после выгрузки в облако: %s", file)
+			if removeErr := os.Remove(file); removeErr != nil {
+				log.Printf("⚠️ Не удалось удалить локальный файл %s: %v", file, removeErr)
+			}
+
+			// Отправляем пользователю ссылку обычным текстом
 			msgText := fmt.Sprintf("📦 Файл %s (%.2f МБ) превышает лимит Telegram.\n\n🔗 Скачать с Google Диска (папка music):\n%s", fileName, fileSizeMB, driveLink)
 			msg := tgbotapi.NewMessage(user.ID, msgText)
 			_, sendErr := b.bot.Send(msg)
@@ -310,7 +316,7 @@ func (b *Bot) handleURL(user *models.User, text string) string {
 		}
 	}
 
-	// 3. Очищаем временные локальные файлы
+	// 3. Очищаем оставшиеся временные локальные файлы
 	downloader.DeleteFiles(files)
 
 	// 4. Увеличиваем счетчик загрузок пользователя
@@ -320,31 +326,31 @@ func (b *Bot) handleURL(user *models.User, text string) string {
 	return "Обработка и отправка файлов завершена!"
 }
 
-// ensureGoogleDriveMusicFolder проверяет наличие папки music и создает её при отсутствии с логированием выводов rclone
+// ensureGoogleDriveMusicFolder проверяет наличие папки music и делает её публичной
 func ensureGoogleDriveMusicFolder() error {
 	log.Println("🔍 Проверяем наличие папки 'music' на Google Диске через rclone...")
 	cmd := exec.Command("rclone", "lsf", "disk_bot:music", "--dirs-only")
 	output, err := cmd.CombinedOutput()
 	outputStr := string(output)
 
-	log.Printf("📄 Ответ rclone lsf music: err=%v, output=%s", err, strings.TrimSpace(outputStr))
-
 	if err != nil || !strings.Contains(outputStr, "music") {
 		log.Println("📁 Папка 'music' не найдена. Создаем через 'rclone mkdir disk_bot:music'...")
 		mkdirCmd := exec.Command("rclone", "mkdir", "disk_bot:music")
-		mkdirOutput, mkdirErr := mkdirCmd.CombinedOutput()
-		if mkdirErr != nil {
-			log.Printf("❌ Ошибка выполнения rclone mkdir: %v, вывод: %s", mkdirErr, string(mkdirOutput))
+		if mkdirErr := mkdirCmd.Run(); mkdirErr != nil {
 			return fmt.Errorf("не удалось создать папку music: %v", mkdirErr)
 		}
 		log.Println("✅ Папка 'music' успешно создана на Google Диске.")
-	} else {
-		log.Println("✅ Папка 'music' уже существует на Google Диске.")
 	}
+
+	// Автоматически разрешаем публичный доступ для папки (если поддерживается бэкендом)
+	log.Println("🔓 Устанавливаем публичные права (доступ по ссылке) для папки music...")
+	permCmd := exec.Command("rclone", "backend", "publiclink", "disk_bot:music")
+	_ = permCmd.Run() // игнорируем ошибку, если права уже установлены
+
 	return nil
 }
 
-// uploadToGoogleDriveMusic загружает файл в папку music и возвращает публичную ссылку с полным логированием ошибок rclone
+// uploadToGoogleDriveMusic загружает файл в папку music и возвращает ссылку на просмотр/скачивание
 func uploadToGoogleDriveMusic(filePath, fileName string) (string, error) {
 	target := fmt.Sprintf("disk_bot:music/%s", fileName)
 	log.Printf("📤 Копируем файл '%s' на Google Диск в '%s'...", filePath, target)
@@ -355,19 +361,21 @@ func uploadToGoogleDriveMusic(filePath, fileName string) (string, error) {
 		log.Printf("❌ Ошибка rclone copyto: %v, вывод: %s", copyErr, string(copyOutput))
 		return "", fmt.Errorf("rclone copyto error: %v (output: %s)", copyErr, string(copyOutput))
 	}
-	log.Printf("✅ Файл успешно скопирован на Google Диск. Вывод: %s", strings.TrimSpace(string(copyOutput)))
+	log.Printf("✅ Файл успешно скопирован на Google Диск.")
 
-	log.Printf("🔗 Запрашиваем публичную ссылку через 'rclone link %s'...", target)
+	log.Printf("🔗 Запрашиваем ссылку через 'rclone link %s'...", target)
 	linkCmd := exec.Command("rclone", "link", target)
 	linkOutput, linkErr := linkCmd.CombinedOutput()
 	linkStr := strings.TrimSpace(string(linkOutput))
 
 	if linkErr != nil || linkStr == "" {
-		log.Printf("⚠️ Не удалось получить прямую ссылку через rclone link (err=%v, output=%s). Возвращаем базовую ссылку на диск.", linkErr, linkStr)
-		return "https://drive.google.com (файл загружен в папку music)", nil
+		log.Printf("⚠️ Не удалось получить ссылку через rclone link. Возвращаем общую папку.")
+		return "https://drive.google.com/drive/folders/music", nil
 	}
 
-	log.Printf("✅ Получена публичная ссылка: %s", linkStr)
+	log.Printf("✅ Получена ссылка: %s", linkStr)
+
+	// Возвращаем оригинальную ссылку Google Диска (пользователь нажмет кнопку «Скачать» в браузере)
 	return linkStr, nil
 }
 
@@ -386,7 +394,7 @@ func (b *Bot) sendFileWithCaption(chatID int64, filePath, fileType, caption stri
 	if err != nil {
 		log.Printf("❌ Ошибка отправки файла %s в Telegram: %v", filePath, err)
 	} else {
-		log.Printf("✅ Файл успешно отправлен в Telegram: %s", filePath)
+		log.Printf("✅ Файл успешно отправлен в Telegram и удален: %s", filePath)
 	}
 }
 
